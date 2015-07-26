@@ -1,89 +1,162 @@
 # -*- coding: utf-8 -*-
 """
-@author: hazh
+Created on Sat Jul 25 21:39:53 2015
 
-inpired by the code here http://stackoverflow.com/a/3244061/1795661
-
+@author: Haz
 """
-
-import os
 import sys
+import os
 from PIL import Image, ImageDraw
 import scipy
 import scipy.misc
 import scipy.cluster
-import colorsys
+from colormath.color_objects import LabColor, sRGBColor, HSVColor
+from colormath.color_conversions import convert_color
+from colormath.color_diff import delta_e_cie2000
+import subprocess
 
 NUM = 10
-PATH = os.getcwd()
+
+# get_prominent_colour_index() calls get_prominent_colour_index()
+# set_image_name() calls get_image_src_input()
 
 def router(mode):
-    files = os.listdir(PATH)
-    files.remove('main.py')                                         #Get list of images in current directory.
-    for f in files:
-        if mode == "0":                                             #Only run for new images.
-            if (f[:3] != "hsv"):
-                main(f)
-        elif mode == "1":                                           #Run for all images in directory.
-            main(f)        
+    file_dir = os.path.join(os.getcwd(), "img")
+    files = os.listdir(file_dir)
+    if mode == "0":
+        update(file_dir, files)
+    elif mode == "1":
+        override(file_dir, files)
+    new_files = os.listdir(file_dir)
+    draw_overview(new_files)
 
-def main(f):
-    codebook, counts = get_colours(f)                               #Get main colours in image.
-    f_path = os.path.join(PATH, f)                                  #Set the images path for later use.
+def update(file_dir, files):
+    for f in files:
+        if f[:3] != "hsv":
+            main(file_dir, f)
     
-    hsv = get_prominent_colour(codebook, counts)                    #Get the image's prominent colour.
-    draw_colour_palette(codebook, counts)                           #Draw palette of colours.
-    set_image_name(f_path, hsv)                                     #Rename the images by hue.
-                
-def get_colours(f):        
-    im = Image.open(f)
-    w, h = im.size
-    wr, hr = int(w * 0.5), int(h * 0.5)
-    im.resize((wr, hr))
-    obs = scipy.misc.fromimage(im).astype(float)                    #Return a copy of a PIL image as a numpy array.
-    shape = obs.shape                                               #Return first two dimensions of obs (array).
-    try:                                           
-        obs = obs.reshape(scipy.product(shape[:2]), shape[2])       #Turn obs into a 1 dimensional array.
-        codebook, distortion = scipy.cluster.vq.kmeans(obs, NUM)
-        code, distortion = scipy.cluster.vq.vq(obs, codebook)
-        counts, bins = scipy.histogram(code, len(codebook))      
-        return codebook, counts           
-    except:
-        print f + " IndexError - deleting..."
-        os.remove(f)   
-            
-def get_prominent_colour(codebook, counts):
-    index_max = scipy.argmax(counts)                                #Get index of highest count in counts.
-    peak = codebook[index_max] / 255                                #Get the most prominent colour.
-    hsv = colorsys.rgb_to_hsv(peak[0], peak[1], peak[2])            #Convert to hsv.
+def override(file_dir, files):
+    for f in files:
+        main(file_dir, f)
+        
+def main(file_dir, f):
+    file_path = os.path.join(file_dir, f)
+    image = get_image(file_path)
+    image = resize_image(image)
+    image = get_image_as_array(image)
+    codebook, counts = get_codebook_and_counts(image) # code == colour
+    colours_hist = get_colours_hist(codebook, counts)
+    colours_hist_sorted = sort_hist(colours_hist)
+    lab_colours_sorted = get_lab_colours(colours_hist_sorted)
+    index = get_prominent_colour_index(lab_colours_sorted)
+    colour = get_prominent_colour(colours_hist_sorted, index)
+    draw_colour_palette(colours_hist_sorted, index)
+    name = set_image_name(file_dir, file_path, colour) 
+
+def get_image(file_path):
+    image = Image.open(file_path)
+    return image
+
+def resize_image(image):
+    width, height = image.size
+    new_image = image.resize((int(width*0.5), int(height*0.5)))
+    return new_image
+
+def get_image_as_array(image):
+    return scipy.misc.fromimage(image).astype(float)
+
+def get_codebook_and_counts(image):                        
+    shape = image.shape                                                                                                    
+    image = image.reshape(scipy.product(shape[:2]), shape[2])                       
+    codebook, distortion = scipy.cluster.vq.kmeans(image, NUM)
+    code, distortion = scipy.cluster.vq.vq(image, codebook)
+    counts, bins = scipy.histogram(code, len(codebook))      
+    return codebook, counts  
+
+def get_colours_hist(codebook, counts):
+    colours_hist = []
+    for code, count in zip(codebook, counts):
+        rgb = tuple(x/255 for x in code)
+        colour = (rgb, count)
+        colours_hist.append(colour)
+    return colours_hist
+
+def sort_hist(hist):
+    return sorted(hist, key=lambda tup: tup[1])
+
+def get_lab_colours(hist): 
+    lab_colours = []
+    for c in hist:
+        rgb = sRGBColor(c[0][0], c[0][1], c[0][2])
+        lab_colours.append(convert_color(rgb, LabColor))
+    return lab_colours 
+
+def get_prominent_colour_index(lab_colours):
+    wrgb = sRGBColor(1,1,1)
+    w = convert_color(wrgb, LabColor) 
+    i, j = 1, 2
+    tol = 100
+    while tol > 20 and i < 8:
+        white_check = compare_colours([w, lab_colours[-i]], 1, 2)
+        if white_check > 5:       
+            tol = compare_colours(lab_colours, i, j)
+        i += 1
+        j += 1
+    return i
+
+def compare_colours(lab_colours, i, j):                                         
+    return delta_e_cie2000(lab_colours[-i], lab_colours[-j])
+
+def get_prominent_colour(hist, i):
+    rgb = tuple(x for x in hist[-i][0])                               
+    hsv = convert_color(sRGBColor(*rgb), HSVColor, through_rgb_type=sRGBColor)
     return hsv
     
-def set_image_name(f_path, hsv):
-    name = "hsv"                                                    #Format image name.
-    for x in hsv:
-        name = name + "-" + str(x)
-    name += ".png"
-    name = os.path.join(PATH, name)
-    os.rename(f_path, name)
-    
-def draw_colour_palette(codebook, counts):
-    colours = []
-    for code, count in zip(codebook, counts):
-        rgb = (code[0], code[1], code[2])
-        colour = (rgb, count)
-        colours.append(colour)
-    sorted_colours = sort_colours(colours)
-    palette = Image.new("RGB", (500, 100))
+def draw_colour_palette(hist, m):
+    palette = Image.new("RGB", (500, 200))
     canvas = ImageDraw.Draw(palette)
     i = 0
-    for c in sorted_colours:
-        rgb = (int(c[0][0]), int(c[0][1]), int(c[0][2]))
-        canvas.rectangle([(50*i,0),(50*(i+1),100)], fill = rgb)
+    for c in hist:
+        rgb = sRGBColor(c[0][0], c[0][1], c[0][2])
+        rgb_int_tuple = tuple(int(x*255) for x in rgb.get_value_tuple())
+        canvas.rectangle([(50*i,0),(50*(i+1),100)], fill = rgb_int_tuple)
         i +=1
+    pc = hist[NUM - m][0]
+    canvas.rectangle([(0,100),(500,200)], fill = tuple(int(x*255) for x in pc))
     palette.show()
+    
+def set_image_name(file_dir, old_path, colour):
+    name = "hsv"                                                                
+    for x in colour.get_value_tuple():
+        name = name + "-" + str(x)
+    #src = get_image_src_input(old_path)
+    #name += "-----" + src
+    name += ".png"
+    name = os.path.join(file_dir, name)
+    os.rename(old_path, name)
+    
+def get_image_src_input(path):
+    image = Image.open(path)
+    image.show()
+    src = raw_input("img src: ")
+    del image
+    return src
 
-def sort_colours(colours):
-    return sorted(colours, key=lambda tup: tup[1])       
-        
+def draw_overview(files):
+    overview = Image.new("RGB", (len(files)*10, 100))
+    canvas = ImageDraw.Draw(overview)
+    colours = []
+    for f in files:
+        f = f[4:-4]
+        hsv = tuple(float(x) for x in f.split("-"))
+        colours.append(hsv)
+    sorted_colours = sorted(colours, key=lambda tup: tup[0])
+    i = 0
+    for colour in sorted_colours:
+        rgb = convert_color(HSVColor(*colour), sRGBColor, through_rgb_type=sRGBColor)
+        canvas.rectangle([(i*10,0),((i+1)*10,100)], fill = tuple(int(x*255) for x in rgb.get_value_tuple())) 
+        i += 1
+    overview.show()
+
 if __name__ == "__main__":
     router(sys.argv[1])
